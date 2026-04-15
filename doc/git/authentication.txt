@@ -1,0 +1,446 @@
+Authentification auprès de l’API REST avec une application OAuth
+Découvrez les différentes façons de s’authentifier avec quelques exemples.
+
+Dans cet article
+Dans cette section, nous allons nous concentrer sur les principes de base de l’authentification. Plus précisément, nous allons créer un serveur Ruby (à l’aide de Sinatra) qui implémente le flux web d’une application de différentes manières.
+
+Conseil
+
+Vous pouvez télécharger le code source complet de ce projet à partir du référentiel platform-samples.
+
+Inscription de votre application
+Pour commencer, vous devez inscrire votre application. Chaque OAuth app inscrite se voit attribuer un ID client et à une clé secrète client uniques. La clé secrète client est utilisée pour obtenir un jeton d’accès pour l’utilisateur connecté. Vous devez inclure la clé secrète client dans votre application native, mais les applications web ne doivent pas divulguer cette valeur.
+
+Vous pouvez remplir toutes les informations comme vous le souhaitez, à l’exception de URL de rappel d’autorisation. C’est l’élément le plus important pour configurer de façon sécurisée votre application. C'est l'URL de rappel que GitHub renvoie à l'utilisateur après une authentification réussie. La propriété de cette URL est ce qui garantit que les utilisateurs se connectent à votre application plutôt que de divulguer des jetons à un attaquant.
+
+Étant donné que nous exécutons un serveur Sinatra standard, l’emplacement de l’instance locale est défini sur http://127.0.0.1:4567. Remplissons l’URL de rappel comme suit : http://127.0.0.1:4567/callback.
+
+Accepter l’autorisation utilisateur
+Avertissement
+
+Mis hors service Avis : L'authentification à l'API GitHub n'est plus accessible à l'aide de paramètres de requête. L'authentification à l'API doit se faire avec Authentification de base HTTP. Pour plus d'informations, y compris sur les coupures de courant programmées, voir l’article de blog.
+
+Maintenant, commençons à configurer notre serveur simple. Créez un fichier appelé server.rb et collez-y ce qui suit :
+
+require 'sinatra'
+require 'rest-client'
+require 'json'
+
+CLIENT_ID = ENV['GH_BASIC_CLIENT_ID']
+CLIENT_SECRET = ENV['GH_BASIC_SECRET_ID']
+
+get '/' do
+  erb :index, :locals => {:client_id => CLIENT_ID}
+end
+Votre ID client et votre clé secrète client proviennent de la page de configuration de votre application. Nous vous recommandons de stocker ces valeurs en tant que variables d’environnement pour faciliter le remplacement et l’utilisation, ce qui est exactement ce que nous avons fait ici.
+
+Ensuite, dans views/index.erb, collez ce contenu :
+
+<html>
+  <head>
+  </head>
+  <body>
+    <p>
+      Well, hello there!
+    </p>
+    <p>
+      We're going to now talk to the GitHub API. Ready?
+      <a href="https://github.com/login/oauth/authorize?scope=user:email&client_id=<%= client_id %>">Click here</a> to begin!
+    </p>
+    <p>
+      If that link doesn't work, remember to provide your own <a href="/apps/building-oauth-apps/authorizing-oauth-apps/">Client ID</a>!
+    </p>
+  </body>
+</html>
+(Si vous n’êtes pas familiarisé avec le fonctionnement de Sinatra, nous vous recommandons de lire le guide Sinatra.)
+
+Notez également que l’URL utilise le paramètre de requête scope pour définir les étendues demandées par l’application. Pour notre application, nous sollicitons l'autorisation user:email pour lire les adresses e-mail personnelles.
+
+Dans votre navigateur, accédez à http://127.0.0.1:4567. Après avoir cliqué sur le lien, vous devriez être dirigé vers GitHub, et voir apparaître une boîte de dialogue « Autoriser l'application ».
+
+Si vous avez confiance en vous, cliquez sur Autoriser l’application. Wuh-oh ! Sinatra renvoie une erreur 404. Quelle en est la raison ?
+
+Vous vous souvenez du moment où nous avons spécifié une URL de rappel sur callback ? Aucun itinéraire n’ayant été fourni pour cela, GitHub ne sait pas vers quelle destination rediriger l’utilisateur après l’autorisation de l’application. Nous allons à présent y remédier.
+
+Mise à disposition d’un rappel
+Dans server.rb, ajoutez un itinéraire pour spécifier ce que le rappel doit faire :
+
+get '/callback' do
+  # get temporary GitHub code...
+  session_code = request.env['rack.request.query_hash']['code']
+
+  # ... and POST it back to GitHub
+  result = RestClient.post('https://github.com/login/oauth/access_token',
+                          {:client_id => CLIENT_ID,
+                           :client_secret => CLIENT_SECRET,
+                           :code => session_code},
+                           :accept => :json)
+
+  # extract the token and granted scopes
+  access_token = JSON.parse(result)['access_token']
+end
+Après une authentification réussie, GitHub fournit une valeur temporaire code. Vous devrez POST ce code à GitHub avec votre secret client en échange d'un access_token. Pour simplifier nos requêtes GET et POST HTTP, nous utilisons le client REST. Notez que vous n’accéderez probablement jamais à l’API via REST. Pour une application plus sérieuse, vous devrez probablement utiliser une bibliothèque écrite dans la langue de votre choix.
+
+Vérification des étendues octroyées
+Les utilisateurs peuvent modifier les étendues que vous avez demandées en modifiant directement l’URL. Cela peut octroyer à votre application moins d'accès que ce que vous aviez demandé à l'origine. Avant d’effectuer des requêtes avec le jeton, vérifiez les étendues octroyées pour le jeton par l’utilisateur. Pour plus d’informations sur les étendues demandées et octroyées, consultez « Étendues des applications OAuth ».
+
+Les étendues octroyées sont retournées dans le cadre de la réponse d’échange de jeton.
+
+get '/callback' do
+  # ...
+  # Get the access_token using the code sample above
+  # ...
+
+  # check if we were granted user:email scope
+  scopes = JSON.parse(result)['scope'].split(',')
+  has_user_email_scope = scopes.include? 'user:email' || scopes.include? 'user'
+end
+Dans notre application, nous utilisons scopes.include? pour vérifier si l’étendue user:email requise pour extraire les adresses e-mail privées de l’utilisateur authentifié nous a été octroyée. Si l'application avait demandé d'autres étendues, nous les aurions également vérifiées.
+
+En outre, étant donné qu’il existe une relation hiérarchique entre les étendues, vous devez vérifier que vous avez reçu le niveau le plus élevé de l’étendue requise. Par exemple, si l’application avait demandé l’étendue user, elle n’aurait pas reçu explicitement l’étendueuser:email. Dans ce cas, elle aurait reçu un jeton avec l’étendue user, qui fonctionne pour demander l’adresse e-mail de l’utilisateur, même s’il n’inclut pas explicitement user:email sur le jeton. La vérification de user et de user:email garantit que vous vérifiez les deux scénarios.
+
+La vérification des étendues avant d’effectuer des requêtes ne suffit pas, car il est possible que les utilisateurs modifient ces étendues entre cette vérification et la requête réelle. Dans une telle situation, les appels d’API censés aboutir peuvent échouer avec un état 404 ou 401, ou retourner un autre sous-ensemble d’informations.
+
+Pour vous aider à gérer correctement ces situations, toutes les réponses d’API correspondant aux requêtes effectuées avec des jetons valides comportent également un en-tête X-OAuth-Scopes. Cet en-tête contient la liste des périmètres du jeton utilisé pour effectuer la requête. En plus de cela, l’API REST fournit un point de terminaison pour vérifier la validité d’un jeton. Utilisez ces informations pour détecter les modifications apportées aux étendues de jeton et informer vos utilisateurs des modifications apportées aux fonctionnalités d’application disponibles.
+
+Effectuer des requêtes authentifiées
+Enfin, ce jeton d’accès vous permet d’effectuer des requêtes authentifiées en tant qu’utilisateur connecté :
+
+# fetch user information
+auth_result = JSON.parse(RestClient.get('https://api.github.com/user',
+                                        {:params => {:access_token => access_token}}))
+
+# if the user authorized it, fetch private emails
+if has_user_email_scope
+  auth_result['private_emails'] =
+    JSON.parse(RestClient.get('https://api.github.com/user/emails',
+                              {:params => {:access_token => access_token}}))
+end
+
+erb :basic, :locals => auth_result
+Nous pouvons faire ce que nous voulons avec nos résultats. Dans ce cas, nous allons les placer directement dans basic.erb :
+
+<p>Hello, <%= login %>!</p>
+<p>
+  <% if !email.nil? && !email.empty? %> It looks like your public email address is <%= email %>.
+  <% else %> It looks like you don't have a public email. That's cool.
+  <% end %>
+</p>
+<p>
+  <% if defined? private_emails %>
+  With your permission, we were also able to dig up your private email addresses:
+  <%= private_emails.map{ |private_email_address| private_email_address["email"] }.join(', ') %>
+  <% else %>
+  Also, you're a bit secretive about your private email addresses.
+  <% end %>
+</p>
+Implémentation d’une authentification « persistante »
+Il ne serait pas pratique de demander aux utilisateurs de se connecter à l’application chaque fois qu’ils ont besoin d’accéder à la page web. Par exemple, essayez d’accéder directement à http://127.0.0.1:4567/basic. Vous allez recevoir une erreur.
+
+Et si nous pouvions contourner l'ensemble du processus « cliquez ici » et nous rappeler que, tant que l'utilisateur est connecté à GitHub, il devrait être en mesure d'accéder à cette application ? Eh bien, il s’agit précisément de ce que nous allons faire.
+
+Notre petit serveur ci-dessus est plutôt simple. Afin d’intégrer une authentification intelligente, nous allons passer à l'utilisation de sessions pour stocker les jetons. Il en résulte une authentification transparente pour l’utilisateur.
+
+En outre, étant donné que nous conservons les étendues au sein de la session, nous devons gérer les cas où l’utilisateur met à jour les étendues après leur vérification, ou révoque le jeton. Pour ce faire, nous allons utiliser un bloc rescue et vérifier que le premier appel d’API a réussi, ce qui permet de vérifier que le jeton est toujours valide. Après cela, nous allons vérifier l’en-tête de réponse X-OAuth-Scopes pour vérifier que l’utilisateur n’a pas révoqué l’étendue user:email.
+
+Créez un fichier appelé advanced_server.rb, puis collez-y ces lignes :
+
+require 'sinatra'
+require 'rest_client'
+require 'json'
+
+# Don't use hard-coded values in your app
+# Instead, set and test environment variables, like below
+# if ENV['GITHUB_CLIENT_ID'] && ENV['GITHUB_CLIENT_SECRET']
+#  CLIENT_ID        = ENV['GITHUB_CLIENT_ID']
+#  CLIENT_SECRET    = ENV['GITHUB_CLIENT_SECRET']
+# end
+
+CLIENT_ID = ENV['GH_BASIC_CLIENT_ID']
+CLIENT_SECRET = ENV['GH_BASIC_SECRET_ID']
+
+use Rack::Session::Pool, :cookie_only => false
+
+def authenticated?
+  session[:access_token]
+end
+
+def authenticate!
+  erb :index, :locals => {:client_id => CLIENT_ID}
+end
+
+get '/' do
+  if !authenticated?
+    authenticate!
+  else
+    access_token = session[:access_token]
+    scopes = []
+
+    begin
+      auth_result = RestClient.get('https://api.github.com/user',
+                                   {:params => {:access_token => access_token},
+                                    :accept => :json})
+    rescue => e
+      # request didn't succeed because the token was revoked so we
+      # invalidate the token stored in the session and render the
+      # index page so that the user can start the OAuth flow again
+
+      session[:access_token] = nil
+      return authenticate!
+    end
+
+    # the request succeeded, so we check the list of current scopes
+    if auth_result.headers.include? :x_oauth_scopes
+      scopes = auth_result.headers[:x_oauth_scopes].split(', ')
+    end
+
+    auth_result = JSON.parse(auth_result)
+
+    if scopes.include? 'user:email'
+      auth_result['private_emails'] =
+        JSON.parse(RestClient.get('https://api.github.com/user/emails',
+                       {:params => {:access_token => access_token},
+                        :accept => :json}))
+    end
+
+    erb :advanced, :locals => auth_result
+  end
+end
+
+get '/callback' do
+  session_code = request.env['rack.request.query_hash']['code']
+
+  result = RestClient.post('https://github.com/login/oauth/access_token',
+                          {:client_id => CLIENT_ID,
+                           :client_secret => CLIENT_SECRET,
+                           :code => session_code},
+                           :accept => :json)
+
+  session[:access_token] = JSON.parse(result)['access_token']
+
+  redirect '/'
+end
+Le code doit globalement vous sembler familier. Par exemple, nous utilisons toujours RestClient.get pour faire appel à l'API GitHub et nous transmettons toujours nos résultats pour qu'ils soient rendus dans un modèle ERB (cette fois, il s'appelle advanced.erb).
+
+De plus, nous disposons désormais de la méthode authenticated? qui vérifie si l’utilisateur est déjà authentifié. Si ce n’est pas le cas, la méthode authenticate! est appelée. Elle effectue le flux OAuth et met à jour la session avec le jeton et les étendues octroyés.
+
+Ensuite, créez un fichier dans les vues appelé advanced.erb et collez-y ce balisage :
+
+<html>
+  <head>
+  </head>
+  <body>
+    <p>Well, well, well, <%= login %>!</p>
+    <p>
+      <% if !email.empty? %> It looks like your public email address is <%= email %>.
+      <% else %> It looks like you don't have a public email. That's cool.
+      <% end %>
+    </p>
+    <p>
+      <% if defined? private_emails %>
+      With your permission, we were also able to dig up your private email addresses:
+      <%= private_emails.map{ |private_email_address| private_email_address["email"] }.join(', ') %>
+      <% else %>
+      Also, you're a bit secretive about your private email addresses.
+      <% end %>
+    </p>
+  </body>
+</html>
+À partir de la ligne de commande, appelez ruby advanced_server.rb, qui démarre votre serveur sur le port 4567, le même port que celui utilisé lorsque nous avions une application Sinatra simple. Lorsque vous accédez à http://127.0.0.1:4567, l’application appelle authenticate! qui vous redirige vers /callback. /callback nous renvoie alors vers /, et comme nous avons été authentifiés, affiche advanced.erb.
+
+Nous pourrions simplifier complètement ce routage aller-retour en changeant simplement notre URL de rappel dans GitHub en /. Mais server.rb et advanced.rb s’appuyant sur la même URL de rappel, il nous faut en faire un peu plus pour que cela fonctionne.
+
+De plus, si nous n'avions jamais autorisé cette application à accéder à nos données GitHub, nous aurions vu la même boîte de dialogue de confirmation que précédemment s'afficher et nous avertir.
+
+Création d’une application OAuth
+Vous pouvez créer et inscrire une OAuth app sous votre compte personnel ou sous toute organisation à laquelle vous avez un accès administratif. Lorsque vous créez votre OAuth app, n’oubliez pas de protéger votre confidentialité en utilisant uniquement les informations que vous considérez comme publiques.
+
+Remarque
+
+Envisagez de créer une GitHub App à la place d’une OAuth app.
+
+GitHub Apps et OAuth apps utilisent OAuth 2.0.
+
+Les OAuth apps peuvent agir uniquement pour le compte d’un utilisateur, tandis que les GitHub Apps peuvent agir pour le compte d’un utilisateur ou indépendamment d’un utilisateur.
+
+Les GitHub Apps utilisent des autorisations de granularité fine, donnent à l’utilisateur davantage de contrôle sur les référentiels auxquels l’application peut accéder et utilisent des jetons à courte durée de vie.
+
+Pour plus d’informations, consultez « Différences entre les applications GitHub et les applications OAuth » et « À propos de la création d’applications GitHub ».
+
+Remarque
+
+Un utilisateur ou une organisation peut posséder jusqu'à 100 OAuth apps.
+
+Dans le coin supérieur droit de n’importe quelle page sur GitHub, cliquez sur votre photo de profil, puis sur  Paramètres.
+
+Dans la barre latérale gauche, cliquez sur  Paramètres de développeur.
+
+Dans la barre latérale gauche, cliquez sur OAuth apps .
+
+Cliquez sur Nouvelle application OAuth.
+
+Remarque
+
+Si vous n’avez pas encore créé d’application, ce bouton indique Inscrire une nouvelle application.
+
+Dans « Nom de l’application », tapez le nom de votre application.
+
+Avertissement
+
+N’utilisez que les informations dans votre OAuth app considérées comme publiques. Évitez d’utiliser des données sensibles, par exemple des URL internes, au moment de la création d’une OAuth app.
+
+Dans « URL de la page d’accueil », tapez l’URL complète du site web de votre application.
+
+Si vous le souhaitez, dans « Description de l’application », tapez une description de votre application qui sera visible par les utilisateurs.
+
+Dans « URL de rappel d’autorisation », tapez l’URL de rappel de votre application.
+
+Remarque
+
+Les OAuth apps ne peuvent pas avoir plusieurs URL de rappel, contrairement aux GitHub Apps.
+
+Si votre OAuth app doit utiliser le flux d’appareil pour identifier et autoriser les utilisateurs, cliquez sur Activer le flux d’appareil. Pour plus d’informations sur le flux d’appareils, consultez « Autorisation des applications OAuth ».
+
+Cliquez sur Register application.
+
+Pour aller plus loin
+
+
+Différences entre les applications GitHub et les applications OAuth
+En général, les GitHub Apps sont préférées aux OAuth apps car elles utilisent des autorisations de granularité fine, elles donnent davantage de contrôle sur les référentiels auxquels l’application peut accéder et elles utilisent des jetons à courte durée de vie.
+
+Dans cet article
+À propos de GitHub Apps et OAuth apps
+En général, les GitHub Apps sont préférables aux OAuth apps. Les GitHub Apps utilisent des autorisations de granularité fine, donnent à l’utilisateur davantage de contrôle sur les référentiels auxquels l’application peut accéder et utilisent des jetons à courte durée de vie. Ces propriétés contribuent à durcir la sécurité de votre application, car elles limitent les dommages potentiels en cas de divulgation des informations d’identification de votre application.
+
+Comme les OAuth apps, les GitHub Apps peuvent toujours utiliser OAuth 2.0, générer un type de jeton OAuth (appelé jeton d’accès utilisateur) et effectuer des actions au nom d’un utilisateur. Toutefois, les GitHub Apps peuvent aussi agir indépendamment d’un utilisateur. Cela est utile pour les automatisations qui ne nécessitent pas d’entrée utilisateur. L’application pourra continuer de fonctionner même si la personne ayant initialement installé l’application sur une organisation quitte cette organisation.
+
+Les GitHub Apps ont des webhooks intégrés centralisés. Les GitHub Apps peuvent recevoir des événements de webhook pour l’ensemble des référentiels et des organisations auxquels l’application a accès. À l’inverse, les OAuth apps doivent configurer des webhooks individuellement pour chaque référentiel et chaque organisation.
+
+La limite de débit pour les GitHub Apps utilisant un jeton d’accès d’installation s’adapte au nombre de référentiels et au nombre d’utilisateurs dans l’organisation. À l’inverse, les OAuth apps ont des limites de débit inférieures et ne sont pas évolutives.
+
+Il y a une situation où les OAuth app sont préférables aux GitHub App. Si votre application a besoin d’un accès aux ressources de niveau entreprise, telles que l’objet d’entreprise lui-même, vous devez utiliser une OAuth app parce qu’une GitHub App ne peut pas recevoir d’autorisations sur une entreprise. Les GitHub Apps peuvent toujours accéder aux ressources d’organisation et de référentiel appartenant à l’entreprise.
+
+Pour plus d’informations sur les GitHub Apps, consultez « À propos de la création d’applications GitHub ».
+
+Pour plus d’informations sur la migration d’une OAuth app existante vers une GitHub App, consultez « Migration d’applications OAuth vers des applications GitHub ».
+
+Qui peut installer GitHub Apps et autoriser OAuth apps ?
+Vous pouvez installer GitHub Apps dans votre compte personnel ou vos organisations. Si vous disposez d’autorisations d’administrateur dans un référentiel, vous pouvez installer GitHub Apps sur des comptes d’organisation. Si une application GitHub est installée dans un référentiel et nécessite des autorisations d’organisation, le propriétaire de l’organisation doit approuver l’application.
+
+Par défaut, seuls les propriétaires d’organisation peuvent gérer les paramètres des applications GitHub dans une organisation. Pour permettre à d’autres utilisateurs de modifier les paramètres de développeur des applications GitHub appartenant à l’organisation, un propriétaire peut leur accorder des autorisations de gestionnaire d’applications GitHub. Les gestionnaires d’applications GitHub ne peuvent pas gérer les applications tierces. Pour plus d’informations sur l’ajout et la suppression de gestionnaires d’applications GitHub dans votre organisation, consultez Rôles dans une organisation.
+
+Les utilisateurs autorisent cependant OAuth apps, ce qui permet à l’application d’agir au nom d’un utilisateur authentifié. Par exemple, vous pouvez autoriser une OAuth app qui trouve toutes les notifications pour l’utilisateur authentifié. Vous pouvez toujours révoquer des autorisations à partir d’une OAuth app.
+
+Les propriétaires d’organisation peuvent choisir d’autoriser ou non les collaborateurs externes à demander l’accès aux OAuth apps et aux GitHub Apps non approuvées. Pour plus d’informations, consultez « Limitation des demandes et installations d’accès aux applications OAuth et GitHub ».
+
+Avertissement
+
+La révocation de toutes les autorisations d'une OAuth app supprime toutes les clés SSH que l'application a générées au nom de l'utilisateur, y compris les clés de déploiement.
+
+Meilleures pratiques pour créer une application OAuth
+Suivez ces meilleures pratiques pour améliorer la sécurité et les performances de votre OAuth app.
+
+Dans cet article
+Utilisez une GitHub App au lieu de
+Si possible, envisagez de créer une GitHub App à la place d’une OAuth app. En général, les GitHub Apps sont préférables aux OAuth apps. Les GitHub Apps utilisent des autorisations de granularité fine, donnent à l’utilisateur davantage de contrôle sur les référentiels auxquels l’application peut accéder et utilisent des jetons à courte durée de vie. Ces propriétés contribuent à durcir la sécurité de votre application, car elles limitent les dommages potentiels en cas de divulgation des informations d’identification de votre application.
+
+Comme les OAuth apps, les GitHub Apps peuvent toujours utiliser OAuth 2.0, générer un type de jeton OAuth (appelé jeton d’accès utilisateur) et effectuer des actions au nom d’un utilisateur. Toutefois, les GitHub Apps peuvent aussi agir indépendamment d’un utilisateur.
+
+Pour plus d’informations sur les GitHub Apps, consultez « À propos de la création d’applications GitHub ».
+
+Pour plus d’informations sur la migration d’une OAuth app existante vers une GitHub App, consultez « Migration d’applications OAuth vers des applications GitHub ».
+
+Utiliser des étendues minimales
+Votre OAuth app ne doit demander que les étendues dont elle a besoin pour exécuter les fonctionnalités prévues. Si des jetons pour votre application sont compromis, cela limite la quantité de dommages susceptibles de se produire. Pour plus d’informations, consultez « Autorisation des applications OAuth ».
+
+Autoriser de manière complète et durable
+Après la connexion d'un utilisateur, les développeurs d'applications doivent prendre des mesures supplémentaires pour s'assurer que l'utilisateur est censé avoir accès aux données de votre système. Chaque connexion nécessite de nouvelles vérifications concernant les abonnements, l'accès et l'état actuel du SSO.
+
+Utilisez l’id durable et unique pour stocker l’utilisateur
+Lorsqu’un utilisateur se connecte et effectue des actions dans votre application, vous devez mémoriser l’utilisateur qui a effectué cette action pour lui accorder l’accès aux mêmes ressources la prochaine fois qu’il se connecte.
+
+Pour enregistrer correctement les utilisateurs dans votre base de données, utilisez toujours l’id de l’utilisateur. Cette valeur ne changera jamais pour l’utilisateur ou sera utilisée pour pointer vers un autre utilisateur. Ainsi, elle garantit que vous fournissez l’accès à l’utilisateur voulu. Vous pouvez trouver l’id de l’utilisateur avec le point de terminaison de l’API REST GET /user. Consultez Points de terminaison d’API REST pour les utilisateurs.
+
+Si vous stockez des références aux référentiels, organisations et entreprises, utilisez leur id également pour vous assurer que vos liens restent exacts.
+
+N’utilisez jamais d’identifiants qui peuvent changer au fil du temps, y compris les descripteurs d’utilisateur, les champs de données dynamiques d’organisation ou les adresses e-mail.
+
+Valider l’accès de l’organisation pour chaque nouvelle authentification
+Lorsque vous connectez un utilisateur, vous devez suivre les organisations pour lesquelles le jeton de l’utilisateur est autorisé. Cela peut changer au fil du temps après la connexion, car les utilisateurs peuvent être supprimés des organisations. Si une organisation utilise l’authentification unique SAML et qu’un utilisateur n’a pas effectué d’authentification unique SAML, le jeton d’accès utilisateur n’aura pas accès à cette organisation. Vous devez utiliser régulièrement le point de terminaison GET /user/installations de l’API REST pour vérifier à quelles organisations un jeton d’accès utilisateur a accès. Si l’utilisateur n’est pas autorisé à accéder à une organisation, vous devez empêcher son accès aux données appartenant à l’organisation au sein de votre propre application jusqu’à ce qu’il procède à l’authentification unique SAML ou rejoigne l’organisation. Pour plus d’informations, consultez « Points de terminaison d’API REST pour GitHub App installations ».
+
+Stocker les données des utilisateurs dans le contexte de l'organisation et de l'entreprise
+Outre le suivi de l’identité de l’utilisateur via le champ id, vous devez conserver les données relatives à l’organisation ou à l’entreprise dont relève chaque utilisateur. Cela vous permettra de vous assurer qu’il n’y a pas de fuite d’informations sensibles si un utilisateur change de rôle.
+
+Par exemple :
+
+Un utilisateur fait partie de l’organisation Mona, qui nécessite une authentification unique SAML, et se connecte à votre application après avoir effectué l’authentification unique. Votre application a désormais accès à ce que fait l’utilisateur dans Mona.
+L’utilisateur extrait un nombre de codes d’un référentiel dans Mona et l’enregistre dans votre application à des fins d’analyse.
+Ultérieurement, l’utilisateur bascule d’une tâche à l’autre et est supprimé de l’organisation Mona.
+Quand l’utilisateur accède à votre application, peut-il toujours voir le code et l’analyse de l’organisation Mona dans son compte d’utilisateur ?
+
+C’est pourquoi il est essentiel de suivre la source des données que votre application enregistre. Dans le cas contraire, votre application devient une menace à la protection des données pour les organisations qui seront susceptibles d’interdire votre application si elles ne peuvent lui faire confiance et ce afin de protéger correctement leurs données.
+
+Vérifier l’accès d’un utilisateur à votre application
+OAuth sera accessible aux utilisateurs extérieurs à votre organisation ou entreprise. Si vous désirez qu’une application soit utilisée uniquement par les membres de votre organisation ou de votre entreprise, vous devez vérifier le statut d’appartenance de l’utilisateur lorsque celui-ci se connecte à votre application.
+
+Pour trouver la liste des organisations dont un utilisateur est membre, vous pouvez utiliser le point de terminaison « Lister les organisations pour l’utilisateur authentifié ». Vous pouvez ensuite valider cette liste par rapport à une liste d’organisations approuvées pour votre application. Pour plus d’informations, consultez « Points de terminaison d’API REST pour les organisations ».
+
+Sécuriser les informations d’identification de votre application
+Avec un secret client, votre application peut autoriser un utilisateur et générer des jetons d’accès utilisateur. Ces jetons peuvent être utilisés pour effectuer des requêtes d’API pour le compte d’un utilisateur.
+
+Vous devez stocker le secret client de votre application et tous les jetons générés de manière sécurisée. Le mécanisme de stockage et son niveau de sécurité relatif dépendent de votre architecture d'intégration et de la plateforme sur laquelle elle s'exécute. En général, vous devez utiliser un mécanisme de stockage destiné à stocker des données sensibles sur la plateforme que vous utilisez.
+
+Clés secrètes client
+Les secrets client sont nécessaires pour générer des jetons d'accès utilisateur pour votre application, sauf si celle-ci utilise le flux de l'appareil. Pour plus d’informations, consultez « Autorisation des applications OAuth ».
+
+Si votre application est un client confidentiel, ce qui signifie qu’elle peut sécuriser la clé secrète client en toute sécurité, envisagez de stocker votre clé secrète client dans un coffre de clés, par exemple Azure Key Vault, ou en tant que variable d’environnement chiffrée ou secret sur votre serveur.
+
+Si votre application est un client public (une application native qui s’exécute sur l’appareil de l’utilisateur, l’utilitaire CLI ou l’application web monopage), vous ne pouvez pas sécuriser votre clé secrète client. Vous devrez expédier la clé secrète client dans le code de l’application, et vous devez utiliser PKCE pour mieux sécuriser le flux d’authentification. Vous devez faire preuve de prudence si vous prévoyez de contrôler l'accès à vos propres services à l'aide de jetons générés par votre application, car les clients publics sont facilement usurpables : n'importe qui peut réutiliser l'ID client de votre application pour se connecter.
+
+N’activez pas le flux de périphérique sans raison
+L’utilisation du code d’autorisation avec PKCE est recommandée plutôt que le flux du périphérique si l’utilisation du secret client dans un client public suscite des préoccupations. Le flux d’appareil ne nécessite pas du tout d’URI de redirection, permettant à un attaquant d’usurper à distance l’identité de votre application dans le cadre d’une attaque par hameçonnage. Pour cette raison, n'activez pas le flux de périphériques pour votre application, sauf si vous utilisez l'application dans un environnement contraint (CLI, périphériques IoT ou systèmes sans affichage).
+
+Jetons d’accès utilisateur
+Si votre application est un site web ou une application web, vous devez chiffrer les jetons sur votre back-end et vous assurer qu’il existe une sécurité autour des systèmes qui peuvent accéder aux jetons. Envisagez de stocker les jetons d’actualisation dans un emplacement distinct des jetons d’accès actifs.
+
+Si votre application est un client natif, une application côté client ou s’exécute sur un appareil utilisateur (par opposition à l’exécution sur vos serveurs), il se peut que vous ne puissiez pas sécuriser les jetons ainsi qu’une application qui s’exécute sur vos serveurs. Vous devez stocker les jetons via le mécanisme recommandé pour la plateforme de votre application, et garder à l’esprit que le mécanisme de stockage peut ne pas être entièrement sécurisé.
+
+Utiliser le type de jeton approprié
+Les OAuth apps peuvent générer des jetons d’accès utilisateur afin d’effectuer des requêtes d’API authentifiées. Votre application ne doit jamais utiliser un personal access token ou un mot de passe GitHub pour s’authentifier.
+
+Planifier la gestion des violations de sécurité
+Vous devez avoir un plan en place afin de pouvoir gérer les violations de sécurité en temps opportun.
+
+Dans le cas où le secret client de votre application est compromis, vous devez générer un nouveau secret, mettre à jour votre application pour utiliser le nouveau secret, et supprimer votre ancien secret.
+
+Dans le cas où les jetons d’accès utilisateur sont compromis, vous devez immédiatement révoquer ces jetons. Pour plus d’informations, consultez « Points de terminaison d’API REST pour les autorisations OAuth ».
+
+Effectuer des analyses de vulnérabilité régulières
+Vous devez effectuer des analyses de vulnérabilité régulières pour votre application. Par exemple, vous pouvez configurer l’analyse du code et l’analyse des secrets pour le dépôt qui héberge le code de votre application. Pour plus d’informations, consultez « À propos de l’analyse du code » et « À propos de l’analyse des secrets ».
+
+Choisir un environnement approprié
+Si votre application s’exécute sur un serveur, vérifiez que votre environnement serveur est sécurisé et qu’il peut gérer le volume de trafic attendu pour votre application.
+
+Utiliser les services de manière sécurisée
+Si votre application utilise des services tiers, ils doivent être utilisés de manière sécurisée :
+
+Tous les services utilisés par votre application doivent avoir une connexion et un mot de passe uniques.
+Les applications ne doivent pas partager de comptes de service tels que les services par e-mail ou de base de données pour gérer votre service SaaS.
+Seuls les employés ayant des tâches administratives doivent avoir un accès administrateur à l’infrastructure qui héberge votre application.
+Ajouter la journalisation et la supervision
+Envisagez d’ajouter des fonctionnalités de journalisation et de supervision pour votre application. Un journal de sécurité peut inclure :
+
+des événements d’authentification et d’autorisation
+des changements de configuration de service
+des lectures et écritures d’objets
+des modifications d’autorisation d’utilisateur et de groupe
+l’élévation du rôle à l’administrateur
+Vos journaux doivent utiliser un horodatage cohérent pour chaque événement et enregistrer les utilisateurs, les adresses IP ou les noms d’hôte pour tous les événements journalisés.
+
+Activer la suppression de données
+Si votre application est disponible pour d’autres utilisateurs, vous devez leur donner un moyen de supprimer leurs données. Les utilisateurs ne doivent pas avoir besoin d’envoyer un e-mail ou d’appeler une personne du support technique pour supprimer leurs données.
+
+Pour aller plus loin
+        [AUTOTITLE](/apps/publishing-apps-to-github-marketplace/creating-apps-for-github-marketplace/security-best-practices-for-apps)
+        [AUTOTITLE](/apps/publishing-apps-to-github-marketplace/creating-apps-for-github-marketplace/customer-experience-best-practices-for-apps)
